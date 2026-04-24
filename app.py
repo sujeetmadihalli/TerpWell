@@ -62,6 +62,26 @@ def detect_crisis(text: str) -> bool:
     return bool(CRISIS_PATTERN.search(text))
 
 
+def detect_crisis_claude(text: str) -> dict:
+    """Claude-powered nuanced crisis classification — catches paraphrases regex misses."""
+    try:
+        client = get_client()
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=80,
+            system=(
+                'You are a crisis detection classifier for a university wellness app. '
+                'Classify the crisis level in the student message. '
+                'Respond with JSON only, no other text: '
+                '{"crisis_level": "none" | "mild" | "urgent", "reason": "one sentence"}'
+            ),
+            messages=[{"role": "user", "content": text}],
+        )
+        return json.loads(response.content[0].text.strip())
+    except Exception:
+        return {"crisis_level": "none", "reason": ""}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PROMPT BUILDERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -104,6 +124,8 @@ You deserve support from trained professionals. Would you like me to help you ta
 - Sexual Assault/Relationship Violence: CARE to Stop Violence (301) 314-2222
 - Dean of Students: (301) 314-8783
 - Resident Life 24/7 Duty Line: (301) 314-9237
+- Accessibility & Disability Service (ADS): (301) 314-7682, ads.umd.edu — ADHD, learning disabilities, autism support
+- ADHD/LD Coaching: through ADS, free for registered students, ads.umd.edu/services/coaching
 
 ## Mood Context:
 Student's current mood: {mood}
@@ -144,6 +166,7 @@ Respond in this EXACT JSON format:
 {
     "approved": true/false,
     "score": 0-100,
+    "sentiment_score": 1-5,
     "checks": {
         "crisis_detection": {"pass": true/false, "note": "..."},
         "no_diagnosis": {"pass": true/false, "note": "..."},
@@ -159,7 +182,9 @@ Respond in this EXACT JSON format:
     },
     "corrections": "If not approved, explain what needs to change. If approved, say 'None needed.'",
     "corrected_response": "If not approved, provide the corrected version. If approved, return the original response unchanged."
-}"""
+}
+
+sentiment_score key: rate the emotional state expressed in the USER MESSAGE on a scale of 1-5 where 1=very distressed, 2=struggling, 3=neutral, 4=doing okay, 5=positive/doing well."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -208,48 +233,95 @@ def parse_governance_json(raw: str) -> dict:
 # RESPONSE GENERATION (two-step: companion → governance)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_response(user_message: str, profile: dict, history: list):
-    """
-    Returns (final_response_text, audit_dict, was_corrected).
-    Uses two Claude calls: companion draft → governance review.
-    """
+def stream_companion(user_message: str, profile: dict, history: list, placeholder) -> str:
+    """Stream companion response token-by-token into a Streamlit placeholder."""
     client = get_client()
-
-    # Step 1: Companion generates response
     messages_payload = history + [{"role": "user", "content": user_message}]
+    full_text = ""
 
-    companion_response = client.messages.create(
+    with client.messages.stream(
         model=MODEL,
         max_tokens=1024,
-        system=companion_system_prompt(profile),
+        system=[{"type": "text", "text": companion_system_prompt(profile), "cache_control": {"type": "ephemeral"}}],
         messages=messages_payload,
-    )
-    draft = companion_response.content[0].text
+    ) as stream:
+        for text in stream.text_stream:
+            full_text += text
+            placeholder.markdown(full_text + "▌")
 
-    # Step 2: Governance reviews it
+    placeholder.markdown(full_text)
+    return full_text
+
+
+def run_governance(user_message: str, draft: str) -> tuple[dict, bool]:
+    """Run governance audit. Returns (audit_dict, was_corrected)."""
+    client = get_client()
     governance_prompt = (
         f"USER MESSAGE:\n{user_message}\n\n"
         f"COMPANION RESPONSE:\n{draft}\n\n"
         f"Review this response."
     )
 
-    governance_response = client.messages.create(
+    response = client.messages.create(
         model=MODEL,
         max_tokens=2048,
-        system=governance_system_prompt(),
+        system=[{"type": "text", "text": governance_system_prompt(), "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": governance_prompt}],
     )
 
-    # Step 3: Parse governance result
-    audit = parse_governance_json(governance_response.content[0].text)
+    audit = parse_governance_json(response.content[0].text)
+    approved = audit.get("approved", True)
 
-    # Step 4: Return final response + audit
-    if audit.get("approved", True):
-        return draft, audit, False
-    else:
+    if not approved:
         corrected = audit.get("corrected_response", "").strip()
-        final = corrected if corrected else draft
-        return final, audit, True
+        audit["_final"] = corrected if corrected else draft
+    else:
+        audit["_final"] = draft
+
+    return audit, not approved
+
+
+def generate_care_plan(messages: list, topics: list, mood: str) -> dict:
+    client = get_client()
+    conversation = "\n".join(
+        f"{m['role'].upper()}: {m['content']}"
+        for m in messages[-12:]
+        if m["role"] in ("user", "assistant")
+    )
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=600,
+        system=[{
+            "type": "text",
+            "text": (
+                "You are a wellness care coordinator for UMD students. "
+                "Based on the conversation, produce a concise 3-step personal care plan. "
+                "Be specific and warm. Reference real UMD resources where relevant. "
+                'Return JSON only: {"steps": [{"action": "...", "detail": "..."}], "note": "..."}'
+            ),
+            "cache_control": {"type": "ephemeral"},
+        }],
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Conversation:\n{conversation}\n\n"
+                f"Topics: {', '.join(topics) or 'General wellness'}\n"
+                f"Mood: {mood or 'Not specified'}\n\n"
+                "Generate a 3-step personalized care plan."
+            ),
+        }],
+    )
+    raw = response.content[0].text.strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+        return {"steps": [], "note": raw}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -695,6 +767,7 @@ def init_session_state():
         "mood": None,
         "crisis_detected": False,
         "governance_scores": [],
+        "sentiment_scores": [],
         "topics": [],
         "breathing_active": False,
         "breathing_phase": "in",
@@ -704,6 +777,8 @@ def init_session_state():
         "show_grounding": False,
         "quick_prompt_selected": None,
         "api_error": None,
+        "care_plan": None,
+        "triage_level": "none",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -760,8 +835,20 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Crisis Resources ───────────────────────────────────────────────────────
-    st.html('<div class="section-label">Quick Resources</div>')
+    # ── Triage Resources ──────────────────────────────────────────────────────
+    st.html('<div class="section-label">Triage Resources</div>')
+
+    triage_level = st.session_state.triage_level
+    if triage_level != "none":
+        t_color = "#ef4444" if triage_level == "urgent" else "#f97316"
+        t_rgb = "239,68,68" if triage_level == "urgent" else "249,115,22"
+        t_label = "🚨 Urgent" if triage_level == "urgent" else "⚠️ Mild Concern"
+        st.html(
+            f"<div style='background:rgba({t_rgb},0.12);border:1px solid rgba({t_rgb},0.4);"
+            f"border-radius:8px;padding:0.3rem 0.7rem;font-size:0.78rem;color:{t_color};"
+            f"margin-bottom:0.5rem;text-align:center;font-weight:600;'>"
+            f"Triage Level: {t_label}</div>"
+        )
 
     resources = [
         ("📞", "988 Lifeline", "Call or text 988 (24/7)"),
@@ -856,6 +943,26 @@ with st.sidebar:
 
     st.divider()
 
+    # ── Emotional Trajectory ───────────────────────────────────────────────────
+    st.html('<div class="section-label">Emotional Trajectory</div>')
+
+    if st.session_state.sentiment_scores:
+        import pandas as pd
+        scores = st.session_state.sentiment_scores
+        df = pd.DataFrame({
+            "Turn": list(range(1, len(scores) + 1)),
+            "Wellbeing": scores,
+        })
+        st.line_chart(df.set_index("Turn"), use_container_width=True, height=90)
+        latest = scores[-1]
+        label = {1: "Very distressed", 2: "Struggling", 3: "Neutral", 4: "Doing okay", 5: "Positive"}.get(latest, "")
+        color = {1: "#ef4444", 2: "#f97316", 3: "#eab308", 4: "#22c55e", 5: "#4ade80"}.get(latest, "#71717a")
+        st.html(f"<div style='text-align:center;font-size:0.78rem;color:{color};margin-top:-6px;'>{label}</div>")
+    else:
+        st.html("<div style='color:#52525b;font-size:0.82rem;text-align:center;'>Chat to see your emotional arc</div>")
+
+    st.divider()
+
     # ── Session Stats ──────────────────────────────────────────────────────────
     st.html('<div class="section-label">Session Stats</div>')
 
@@ -907,8 +1014,11 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.crisis_detected = False
         st.session_state.governance_scores = []
+        st.session_state.sentiment_scores = []
         st.session_state.topics = []
         st.session_state.quick_prompt_selected = None
+        st.session_state.care_plan = None
+        st.session_state.triage_level = "none"
         st.rerun()
 
 
@@ -960,8 +1070,11 @@ if not st.session_state.messages:
             ">🧠</div>
 
             <div style="background:linear-gradient(135deg,#14b8a6,#8b5cf6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-size:3.2rem;font-weight:800;line-height:1.1;">TerpWell</div>
-            <div style="font-size: 1.05rem; color: #71717a; margin-top: 0.5rem; margin-bottom: 2rem;">
+            <div style="font-size: 1.05rem; color: #71717a; margin-top: 0.5rem;">
                 Your UMD wellness companion, with built-in AI governance
+            </div>
+            <div style="font-size: 0.85rem; color: #14b8a6; margin-top: 0.35rem; margin-bottom: 2rem; font-weight: 500;">
+                No waitlist. No cost. Available right now.
             </div>
         </div>
         """
@@ -1094,6 +1207,53 @@ else:
 # ─────────────────────────────────────────────────────────────────────────────
 # COPING TOOLS SECTION
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ── SESSION CARE PLAN ────────────────────────────────────────────────────────
+user_msg_count = len([m for m in st.session_state.messages if m["role"] == "user"])
+if user_msg_count >= 4:
+    st.html("<div style='height:0.5rem'></div>")
+    cp_col1, cp_col2 = st.columns([3, 1])
+    with cp_col1:
+        st.html(
+            "<div style='font-size:0.72rem;color:#52525b;text-transform:uppercase;"
+            "letter-spacing:0.08em;margin-bottom:0.3rem;'>Personalized Care Plan</div>"
+        )
+    with cp_col2:
+        if st.button("📋 Generate", use_container_width=True, key="gen_care_plan"):
+            with st.spinner("Building your care plan…"):
+                plan = generate_care_plan(
+                    st.session_state.messages,
+                    list(set(st.session_state.topics)),
+                    st.session_state.mood or "Not specified",
+                )
+            st.session_state.care_plan = plan
+            st.rerun()
+
+    if st.session_state.care_plan:
+        plan = st.session_state.care_plan
+        steps = plan.get("steps", [])
+        note = plan.get("note", "")
+        steps_html = ""
+        for i, step in enumerate(steps[:3], 1):
+            action = step.get("action", "")
+            detail = step.get("detail", "")
+            steps_html += (
+                f"<div style='margin-bottom:0.6rem;'>"
+                f"<div style='font-size:0.88rem;font-weight:600;color:#e4e4e7;margin-bottom:2px;'>"
+                f"Step {i}: {action}</div>"
+                f"<div style='font-size:0.8rem;color:#71717a;'>{detail}</div>"
+                f"</div>"
+            )
+        if note:
+            steps_html += (
+                f"<div style='font-size:0.8rem;color:#14b8a6;margin-top:0.5rem;"
+                f"border-top:1px solid rgba(255,255,255,0.06);padding-top:0.5rem;'>{note}</div>"
+            )
+        st.html(
+            f"<div class='glass-card' style='border-left:3px solid #14b8a6;'>"
+            f"{steps_html}</div>"
+        )
+
 
 st.html(
     "<div style='margin-top:1rem;margin-bottom:0.5rem;font-size:0.72rem;color:#52525b;"
@@ -1256,29 +1416,27 @@ if prefill_value and not user_input:
 if user_input and user_input.strip():
     raw_text = user_input.strip()
 
-    # Guard: skip empty
     if not raw_text:
         st.stop()
 
-    # Crisis detection (client-side)
+    # Fast regex crisis check first
     if detect_crisis(raw_text):
         st.session_state.crisis_detected = True
 
     # Extract topics
-    new_topics = extract_topics(raw_text)
-    st.session_state.topics.extend(new_topics)
+    st.session_state.topics.extend(extract_topics(raw_text))
 
-    # Add user message to history
+    # Save user message
     st.session_state.messages.append({
         "role": "user",
         "content": raw_text,
         "timestamp": datetime.datetime.now().strftime("%H:%M"),
     })
 
-    # Build conversation history for API (role + content only)
+    # Build API history (exclude the message we just added)
     api_history = [
         {"role": m["role"], "content": m["content"]}
-        for m in st.session_state.messages[:-1]  # exclude latest user msg
+        for m in st.session_state.messages[:-1]
         if m["role"] in ("user", "assistant")
     ]
 
@@ -1287,43 +1445,58 @@ if user_input and user_input.strip():
         "topics": list(set(st.session_state.topics)),
     }
 
-    # Show typing indicators
-    with st.spinner("🧠 TerpWell is listening…"):
-        time.sleep(0.3)  # brief visual pause
+    # Render the user bubble inline so it appears before streaming starts
+    st.html(
+        f"""<div class="user-bubble">
+            <div class="user-bubble-inner">{raw_text}</div>
+        </div>"""
+    )
 
-    with st.spinner("🛡️ Governance reviewing…"):
-        try:
-            final_response, audit, was_corrected = generate_response(
-                raw_text, profile, api_history
-            )
+    # Streaming assistant bubble
+    st.html('<div class="assistant-bubble"><div class="assistant-avatar">🧠</div>')
+    stream_placeholder = st.empty()
+    st.html("</div>")
 
-            # Update governance scores
-            score = audit.get("score", 100)
-            st.session_state.governance_scores.append(score)
+    try:
+        # Stream companion response
+        draft = stream_companion(raw_text, profile, api_history, stream_placeholder)
 
-            # Add assistant message
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": final_response,
-                "timestamp": datetime.datetime.now().strftime("%H:%M"),
-                "audit": audit,
-                "was_corrected": was_corrected,
-            })
+        # Claude-powered crisis detection (runs after streaming, catches nuanced signals)
+        with st.spinner("🛡️ Auditing response…"):
+            crisis_result = detect_crisis_claude(raw_text)
+            level = crisis_result.get("crisis_level", "none")
+            st.session_state.triage_level = level
+            if level in ("mild", "urgent"):
+                st.session_state.crisis_detected = True
 
-        except anthropic.AuthenticationError:
-            st.session_state.api_error = (
-                "Authentication failed. Please set ANTHROPIC_API_KEY or configure AWS credentials."
-            )
-        except anthropic.RateLimitError:
-            st.session_state.api_error = (
-                "Rate limit reached. Please wait a moment and try again."
-            )
-        except anthropic.APIConnectionError:
-            st.session_state.api_error = (
-                "Connection error. Please check your internet connection."
-            )
-        except Exception as e:
-            st.session_state.api_error = f"Unexpected error: {str(e)[:200]}"
+            audit, was_corrected = run_governance(raw_text, draft)
+
+        final_response = audit.pop("_final", draft)
+
+        # Record governance score and sentiment
+        st.session_state.governance_scores.append(audit.get("score", 100))
+        sentiment = audit.get("sentiment_score", 3)
+        if isinstance(sentiment, int) and 1 <= sentiment <= 5:
+            st.session_state.sentiment_scores.append(sentiment)
+
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": final_response,
+            "timestamp": datetime.datetime.now().strftime("%H:%M"),
+            "audit": audit,
+            "was_corrected": was_corrected,
+        })
+
+    except anthropic.AuthenticationError:
+        st.session_state.api_error = (
+            "Authentication failed. Please set ANTHROPIC_API_KEY or configure AWS credentials."
+        )
+    except anthropic.RateLimitError:
+        st.session_state.api_error = "Rate limit reached. Please wait a moment and try again."
+    except anthropic.APIConnectionError:
+        st.session_state.api_error = "Connection error. Please check your internet connection."
+    except Exception as e:
+        st.session_state.api_error = f"Unexpected error: {str(e)[:200]}"
 
     st.rerun()
 
