@@ -6,6 +6,204 @@ Clean mobile-first redesign with two-layer AI governance.
 import os, json, time, re, random, datetime
 import streamlit as st
 import anthropic
+import sqlite3
+import plotly.graph_objects as go
+import plotly.express as px
+from pathlib import Path
+
+# ── DATABASE ───────────────────────────────────────────────────────────────────
+
+DB_PATH = Path("/home/sujeet/terpwell/terpwell.db")
+
+def get_db():
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+def init_db():
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS mood_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            mood TEXT NOT NULL,
+            mood_score INTEGER NOT NULL,
+            note TEXT DEFAULT '',
+            logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            audit_json TEXT DEFAULT '{}',
+            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES chat_sessions(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+def seed_test_user():
+    """Create test user with 30 days of realistic mood data."""
+    conn = get_db()
+
+    # Check if test user exists
+    existing = conn.execute("SELECT id FROM users WHERE username = 'testterp'").fetchone()
+    if existing:
+        conn.close()
+        return
+
+    # Create test user
+    conn.execute("INSERT INTO users (username, password, display_name) VALUES ('testterp', 'terp2026', 'Testudo Terp')")
+    user_id = conn.execute("SELECT id FROM users WHERE username = 'testterp'").fetchone()[0]
+
+    # Seed 30 days of mood data with realistic college patterns
+    import datetime as dt
+    now = dt.datetime.now()
+
+    # Realistic pattern: stressed during weekdays, better on weekends, dip during midterms
+    mood_map = {"😢": 1, "😟": 2, "😐": 3, "🙂": 4, "😊": 5}
+    moods = list(mood_map.keys())
+
+    notes = {
+        1: ["feeling overwhelmed", "couldn't sleep", "had a panic attack before class", "everything feels like too much"],
+        2: ["stressed about homework", "didn't eat well today", "skipped class", "feeling behind in CMSC"],
+        3: ["okay day", "went through the motions", "meh", "nothing special"],
+        4: ["good study session at McKeldin", "hung out with friends at Stamp", "nice walk by Lake Artemesia", "productive day"],
+        5: ["great day! aced my quiz", "beautiful day on the mall", "fun RecWell climbing session", "laughed a lot with roommates"],
+    }
+
+    for day_offset in range(30, 0, -1):
+        date = now - dt.timedelta(days=day_offset)
+        weekday = date.weekday()  # 0=Mon, 6=Sun
+
+        # Base mood: weekdays lower, weekends higher
+        if weekday < 5:  # weekday
+            base = random.choices([1, 2, 3, 4, 5], weights=[5, 15, 40, 30, 10])[0]
+        else:  # weekend
+            base = random.choices([1, 2, 3, 4, 5], weights=[2, 8, 25, 40, 25])[0]
+
+        # Midterm dip (days 10-15 ago)
+        if 10 <= day_offset <= 15:
+            base = max(1, base - 1)
+
+        # Recovery after midterms (days 5-9 ago)
+        if 5 <= day_offset <= 9:
+            base = min(5, base + 1)
+
+        # 1-3 entries per day
+        num_entries = random.choices([1, 2, 3], weights=[40, 40, 20])[0]
+
+        for entry_idx in range(num_entries):
+            # Slight variation per entry
+            score = max(1, min(5, base + random.randint(-1, 1)))
+            emoji = moods[score - 1]
+            note = random.choice(notes[score]) if random.random() > 0.3 else ""
+
+            # Random time during the day
+            hour = random.randint(7, 23)
+            minute = random.randint(0, 59)
+            entry_time = date.replace(hour=hour, minute=minute, second=0)
+
+            conn.execute(
+                "INSERT INTO mood_entries (user_id, mood, mood_score, note, logged_at) VALUES (?, ?, ?, ?, ?)",
+                (user_id, emoji, score, note, entry_time.strftime("%Y-%m-%d %H:%M:%S"))
+            )
+
+    conn.commit()
+    conn.close()
+
+# DB helper functions
+def authenticate(username, password):
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+    conn.close()
+    return dict(user) if user else None
+
+def log_mood_db(user_id, mood, mood_score, note=""):
+    conn = get_db()
+    conn.execute("INSERT INTO mood_entries (user_id, mood, mood_score, note) VALUES (?, ?, ?, ?)",
+                 (user_id, mood, mood_score, note))
+    conn.commit()
+    conn.close()
+
+def get_mood_history(user_id, days=30):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM mood_entries WHERE user_id = ? AND logged_at >= datetime('now', ?) ORDER BY logged_at",
+        (user_id, f"-{days} days")
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_mood_summary(user_id, days=7):
+    """Get mood stats for the last N days."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT mood_score, logged_at FROM mood_entries WHERE user_id = ? AND logged_at >= datetime('now', ?) ORDER BY logged_at",
+        (user_id, f"-{days} days")
+    ).fetchall()
+    conn.close()
+    if not rows:
+        return {"avg": 0, "count": 0, "trend": "neutral", "entries": []}
+
+    scores = [r["mood_score"] for r in rows]
+    avg = sum(scores) / len(scores)
+
+    # Trend: compare first half to second half
+    mid = len(scores) // 2
+    if mid > 0:
+        first_half = sum(scores[:mid]) / mid
+        second_half = sum(scores[mid:]) / (len(scores) - mid)
+        if second_half - first_half > 0.5:
+            trend = "improving"
+        elif first_half - second_half > 0.5:
+            trend = "declining"
+        else:
+            trend = "stable"
+    else:
+        trend = "neutral"
+
+    return {"avg": avg, "count": len(scores), "trend": trend, "entries": [dict(r) for r in rows]}
+
+def create_chat_session(user_id):
+    conn = get_db()
+    conn.execute("INSERT INTO chat_sessions (user_id) VALUES (?)", (user_id,))
+    session_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+    conn.close()
+    return session_id
+
+def save_chat_message(session_id, user_id, role, content, audit_json="{}"):
+    conn = get_db()
+    conn.execute("INSERT INTO chat_messages (session_id, user_id, role, content, audit_json) VALUES (?, ?, ?, ?, ?)",
+                 (session_id, user_id, role, content, audit_json))
+    conn.commit()
+    conn.close()
+
+# Initialize DB and seed on startup
+init_db()
+seed_test_user()
+
+# ── API SETUP ──────────────────────────────────────────────────────────────────
 
 USE_BEDROCK = not os.environ.get("ANTHROPIC_API_KEY")
 MODEL = "us.anthropic.claude-sonnet-4-6" if USE_BEDROCK else "claude-sonnet-4-6-20250514"
@@ -74,7 +272,7 @@ def extract_topics(text: str) -> list:
 
 # ── PROMPTS ───────────────────────────────────────────────────────────────────
 
-def companion_prompt(mood):
+def companion_prompt(mood, mood_context=""):
     return f"""You are TerpWell — think of yourself as a caring older student at the University of Maryland who's been through it all. You talk like a real person, not a chatbot. You use casual language, contractions, and you're genuinely warm. You're NOT a therapist, counselor, or medical professional — you're a supportive friend who happens to know every resource on campus.
 
 ## Your Personality:
@@ -147,6 +345,10 @@ These are real people who care and are trained to help. Can I help you take that
 ## Right Now:
 Student's current mood: {mood}
 
+## Student's Recent Mood Pattern:
+{mood_context}
+Use this context to personalize your response. If their mood has been declining, be extra gentle. If improving, acknowledge their progress.
+
 ## Rules:
 - Be a human, not a helpline script
 - Reference specific UMD places, not generic "go outside" or "try meditation"
@@ -191,10 +393,17 @@ def stream_companion(user_message: str, mood: str, history: list, placeholder) -
     messages_payload = history + [{"role": "user", "content": user_message}]
     full_text = ""
 
+    # Build mood context
+    if st.session_state.get("user"):
+        summary = get_mood_summary(st.session_state.user["id"], days=7)
+        mood_context = f"Last 7 days: {summary['count']} entries, avg {summary['avg']:.1f}/5, trend: {summary['trend']}"
+    else:
+        mood_context = ""
+
     with client.messages.stream(
         model=MODEL,
         max_tokens=1024,
-        system=companion_prompt(mood),
+        system=companion_prompt(mood, mood_context),
         messages=messages_payload,
     ) as stream:
         for text in stream.text_stream:
@@ -268,6 +477,21 @@ def generate_care_plan(messages: list, topics: list, mood: str) -> dict:
         return {"steps": [], "note": raw}
 
 
+# ── PLOTLY HELPERS ────────────────────────────────────────────────────────────
+
+MOOD_COLORS = {1: "#ff453a", 2: "#ff9f0a", 3: "#ffd60a", 4: "#30d158", 5: "#34c759"}
+
+def plotly_dark_theme():
+    return dict(
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color='#888', family='Inter'),
+        xaxis=dict(gridcolor='#1a1a1a', zerolinecolor='#1a1a1a'),
+        yaxis=dict(gridcolor='#1a1a1a', zerolinecolor='#1a1a1a'),
+        margin=dict(l=40, r=20, t=40, b=40),
+    )
+
+
 # ── PAGE CONFIG ────────────────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -285,12 +509,16 @@ defaults = {
     "crisis_detected": False,
     "pending_prompt": None,
     "show_resources": False,
-    "show_mood_log": False,
-    "mood_log": [],
     "topics": [],
     "triage_level": "none",
     "care_plan": None,
     "api_error": None,
+    # Auth
+    "logged_in": False,
+    "user": None,
+    "chat_session_id": None,
+    # Navigation
+    "screen": "login",  # "login", "chat", "mood_dashboard"
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -551,23 +779,7 @@ html, body, [class*="css"] { font-family: 'Inter', -apple-system, sans-serif !im
     border-color: #3a3a3a !important;
     color: #fff !important;
 }
-/* Header buttons override — make circular */
-[data-testid="stHorizontalBlock"]:first-of-type .stButton > button {
-    border-radius: 50% !important;
-    padding: 6px !important;
-    min-height: 38px !important;
-    width: 38px !important;
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    background: #1a1a1a !important;
-    border: 1px solid #2a2a2a !important;
-    font-size: 1rem !important;
-}
-[data-testid="stHorizontalBlock"]:first-of-type .stButton > button:hover {
-    border-color: #0a84ff !important;
-    background: rgba(10,132,255,0.08) !important;
-}
+/* No special circular overrides — let all buttons use the default pill style */
 
 [data-testid="stHorizontalBlock"] { gap: 8px !important; }
 
@@ -583,35 +795,349 @@ html, body, [class*="css"] { font-family: 'Inter', -apple-system, sans-serif !im
     padding: 12px 0;
     margin-top: 8px;
 }
+
+/* Login */
+.login-container { max-width: 360px; margin: 80px auto 0; text-align: center; }
+.login-logo { font-size: 3rem; margin-bottom: 12px; }
+.login-title { font-size: 1.5rem; font-weight: 600; color: #fff; margin-bottom: 4px; }
+.login-sub { font-size: 0.85rem; color: #666; margin-bottom: 32px; }
+.login-hint { font-size: 0.72rem; color: #444; margin-top: 16px; }
+.login-error { color: #ff453a; font-size: 0.82rem; margin-top: 8px; }
+
+/* Stat cards */
+.stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 16px 0; }
+.stat-card {
+    background: #141414;
+    border: 1px solid #1e1e1e;
+    border-radius: 14px;
+    padding: 16px;
+    text-align: center;
+}
+.stat-value { font-size: 1.5rem; font-weight: 700; color: #fff; }
+.stat-label { font-size: 0.72rem; color: #666; margin-top: 4px; }
+.stat-sub { font-size: 0.75rem; color: #888; margin-top: 2px; }
+
+/* Dashboard nav */
+.dash-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 0 12px;
+    border-bottom: 1px solid #1a1a1a;
+    margin-bottom: 16px;
+}
+.dash-title { font-size: 1rem; font-weight: 600; color: #fff; }
+
+/* Mood entry row */
+.mood-entry-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid #111;
+}
+.mood-entry-time { font-size: 0.75rem; color: #555; width: 80px; }
+.mood-entry-emoji { font-size: 1.2rem; }
+.mood-entry-note { font-size: 0.82rem; color: #999; }
 </style>""")
 
-# ── HEADER ─────────────────────────────────────────────────────────────────────
+# ── SCREEN RENDERERS ──────────────────────────────────────────────────────────
 
-mood_display = f" · {st.session_state.mood}" if st.session_state.mood else ""
+def render_login_screen():
+    st.html("""<div class="login-container">
+    <div class="login-logo">🐢</div>
+    <div class="login-title">TerpWell</div>
+    <div class="login-sub">Welcome back, Terp</div>
+</div>""")
 
-hdr_left, hdr_center, hdr_right = st.columns([0.15, 0.70, 0.15], gap="small")
-with hdr_left:
-    if st.button("📊", key="mood_log_toggle", use_container_width=False):
-        st.session_state.show_mood_log = not st.session_state.show_mood_log
-        st.session_state.show_resources = False
+    username = st.text_input("Username", placeholder="Username", label_visibility="collapsed", key="login_username")
+    password = st.text_input("Password", placeholder="Password", type="password", label_visibility="collapsed", key="login_password")
+
+    if st.button("Log In", use_container_width=True, key="login_btn"):
+        user = authenticate(username.strip(), password.strip())
+        if user:
+            st.session_state.logged_in = True
+            st.session_state.user = user
+            st.session_state.screen = "chat"
+            st.session_state.chat_session_id = create_chat_session(user["id"])
+            st.rerun()
+        else:
+            st.html('<div class="login-error">Invalid username or password.</div>')
+
+    st.html('<div class="login-hint">Demo: testterp / terp2026</div>')
+
+
+def render_mood_dashboard():
+    import html as html_mod
+    import datetime as dt
+
+    user = st.session_state.user
+
+    # Header nav
+    nav_left, nav_center, nav_right = st.columns([0.25, 0.5, 0.25], gap="small")
+    with nav_left:
+        if st.button("← Chat", key="dash_back", use_container_width=True):
+            st.session_state.screen = "chat"
+            st.rerun()
+    with nav_center:
+        st.html('<div class="dash-title" style="text-align:center;padding-top:8px;">Mood Dashboard</div>')
+    with nav_right:
+        if st.button("+ Log Mood", key="dash_log_btn", use_container_width=True):
+            st.session_state["dash_show_log"] = not st.session_state.get("dash_show_log", False)
+            st.rerun()
+
+    st.html('<div style="border-bottom:1px solid #1a1a1a;margin-bottom:16px;"></div>')
+
+    # Quick mood logger (toggleable)
+    if st.session_state.get("dash_show_log", False):
+        st.html('<div style="background:#111;border:1px solid #1e1e1e;border-radius:14px;padding:16px;margin-bottom:16px;">'
+                '<div style="font-size:0.82rem;color:#888;margin-bottom:10px;">How are you feeling right now?</div></div>')
+        mood_note_dash = st.text_input("Note (optional)", placeholder="What's going on?", key="dash_mood_note", label_visibility="collapsed")
+        mood_emojis = ["😢", "😟", "😐", "🙂", "😊"]
+        mood_scores = {"😢": 1, "😟": 2, "😐": 3, "🙂": 4, "😊": 5}
+        dash_m_cols = st.columns(5)
+        for mi, (mc, me) in enumerate(zip(dash_m_cols, mood_emojis)):
+            with mc:
+                if st.button(me, key=f"dash_mlog_{mi}", use_container_width=True):
+                    log_mood_db(user["id"], me, mood_scores[me], mood_note_dash or "")
+                    st.session_state.mood = me
+                    st.session_state["dash_show_log"] = False
+                    st.rerun()
+
+    # Load data
+    entries = get_mood_history(user["id"], days=30)
+    summary_7 = get_mood_summary(user["id"], days=7)
+    summary_30 = get_mood_summary(user["id"], days=30)
+
+    if not entries:
+        st.html('<div style="text-align:center;color:#555;padding:60px 0;font-size:0.9rem;">No mood data yet. Log your first mood above!</div>')
+        return
+
+    # ── STAT CARDS ──
+    mood_emojis_map = {1: "😢", 2: "😟", 3: "😐", 4: "🙂", 5: "😊"}
+    avg_score = summary_30["avg"]
+    avg_emoji = mood_emojis_map.get(round(avg_score), "😐")
+    trend_sym = {"improving": "↑", "declining": "↓", "stable": "→", "neutral": "→"}.get(summary_7["trend"], "→")
+    trend_color = {"improving": "#34c759", "declining": "#ff453a", "stable": "#888", "neutral": "#888"}.get(summary_7["trend"], "#888")
+
+    # Calculate streak
+    streak = 0
+    if entries:
+        dates_logged = set()
+        for e in entries:
+            try:
+                d = dt.datetime.strptime(e["logged_at"][:10], "%Y-%m-%d").date()
+                dates_logged.add(d)
+            except Exception:
+                pass
+        today = dt.date.today()
+        check = today
+        while check in dates_logged:
+            streak += 1
+            check -= dt.timedelta(days=1)
+
+    st.html(f"""<div class="stat-grid">
+    <div class="stat-card">
+        <div class="stat-value">{streak}</div>
+        <div class="stat-label">Day Streak</div>
+        <div class="stat-sub">consecutive days logged</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{avg_emoji} {avg_score:.1f}</div>
+        <div class="stat-label">30-Day Average</div>
+        <div class="stat-sub">out of 5</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" style="color:{trend_color};">{trend_sym} {summary_7["trend"].title()}</div>
+        <div class="stat-label">7-Day Trend</div>
+        <div class="stat-sub">{summary_7["count"]} entries this week</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{summary_30["count"]}</div>
+        <div class="stat-label">Total Entries</div>
+        <div class="stat-sub">last 30 days</div>
+    </div>
+</div>""")
+
+    theme = plotly_dark_theme()
+
+    # ── CHART 1: 30-Day Mood Timeline ──
+    st.html('<div style="font-size:0.82rem;font-weight:600;color:#888;margin:20px 0 8px;text-transform:uppercase;letter-spacing:0.05em;">30-Day Timeline</div>')
+
+    import pandas as pd
+    df = pd.DataFrame(entries)
+    df["logged_at"] = pd.to_datetime(df["logged_at"])
+    df = df.sort_values("logged_at")
+
+    fig1 = go.Figure()
+
+    # Individual points colored by score
+    for score_val in [1, 2, 3, 4, 5]:
+        mask = df["mood_score"] == score_val
+        sub = df[mask]
+        if not sub.empty:
+            fig1.add_trace(go.Scatter(
+                x=sub["logged_at"],
+                y=sub["mood_score"],
+                mode="markers",
+                marker=dict(color=MOOD_COLORS[score_val], size=6, opacity=0.7),
+                name=f"Score {score_val}",
+                showlegend=False,
+            ))
+
+    # Rolling 3-day average
+    df_daily = df.set_index("logged_at").resample("D")["mood_score"].mean().reset_index()
+    df_daily["rolling"] = df_daily["mood_score"].rolling(3, min_periods=1).mean()
+    fig1.add_trace(go.Scatter(
+        x=df_daily["logged_at"],
+        y=df_daily["rolling"],
+        mode="lines",
+        line=dict(color="#0a84ff", width=2),
+        name="3-day avg",
+        showlegend=True,
+    ))
+
+    fig1.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color='#888', family='Inter'),
+        xaxis=dict(gridcolor='#1a1a1a', zerolinecolor='#1a1a1a'),
+        yaxis=dict(gridcolor='#1a1a1a', zerolinecolor='#1a1a1a', range=[0.5, 5.5],
+                   tickvals=[1, 2, 3, 4, 5], ticktext=["😢", "😟", "😐", "🙂", "😊"]),
+        legend=dict(font=dict(color="#666", size=10), bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=40, r=20, t=20, b=40),
+        height=220,
+    )
+    st.plotly_chart(fig1, use_container_width=True)
+
+    # ── CHART 2: Weekly Averages ──
+    st.html('<div style="font-size:0.82rem;font-weight:600;color:#888;margin:20px 0 8px;text-transform:uppercase;letter-spacing:0.05em;">Weekly Averages</div>')
+
+    df["week"] = df["logged_at"].dt.to_period("W").apply(lambda r: r.start_time)
+    weekly = df.groupby("week")["mood_score"].mean().reset_index()
+    weekly = weekly.tail(4)
+    week_labels = [w.strftime("%-m/%-d") for w in weekly["week"]]
+    week_colors = [MOOD_COLORS.get(round(s), "#888") for s in weekly["mood_score"]]
+
+    fig2 = go.Figure(go.Bar(
+        x=week_labels,
+        y=weekly["mood_score"],
+        marker_color=week_colors,
+        text=[f"{v:.1f}" for v in weekly["mood_score"]],
+        textposition="outside",
+        textfont=dict(color="#888", size=10),
+    ))
+    fig2.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color='#888', family='Inter'),
+        xaxis=dict(gridcolor='#1a1a1a', zerolinecolor='#1a1a1a'),
+        yaxis=dict(gridcolor='#1a1a1a', zerolinecolor='#1a1a1a', range=[0, 5.8]),
+        margin=dict(l=40, r=20, t=20, b=40),
+        height=200,
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+
+    # ── CHARTS 3 & 4 side by side ──
+    col3, col4 = st.columns(2, gap="small")
+
+    with col3:
+        st.html('<div style="font-size:0.82rem;font-weight:600;color:#888;margin:8px 0;text-transform:uppercase;letter-spacing:0.05em;">Mood Distribution</div>')
+        mood_counts = df["mood"].value_counts().reset_index()
+        mood_counts.columns = ["mood", "count"]
+        donut_colors = [MOOD_COLORS.get({"😢": 1, "😟": 2, "😐": 3, "🙂": 4, "😊": 5}.get(m, 3), "#888")
+                        for m in mood_counts["mood"]]
+        fig3 = go.Figure(go.Pie(
+            labels=mood_counts["mood"],
+            values=mood_counts["count"],
+            hole=0.55,
+            marker=dict(colors=donut_colors),
+            textfont=dict(size=11),
+        ))
+        fig3.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#888', family='Inter'),
+            showlegend=False,
+            height=200,
+            margin=dict(l=10, r=10, t=10, b=10),
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+
+    with col4:
+        st.html('<div style="font-size:0.82rem;font-weight:600;color:#888;margin:8px 0;text-transform:uppercase;letter-spacing:0.05em;">By Day of Week</div>')
+        df["dow"] = df["logged_at"].dt.dayofweek
+        dow_avg = df.groupby("dow")["mood_score"].mean().reindex(range(7)).fillna(0).reset_index()
+        dow_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        dow_colors = [MOOD_COLORS.get(round(s), "#2a2a2a") if s > 0 else "#2a2a2a"
+                      for s in dow_avg["mood_score"]]
+        fig4 = go.Figure(go.Bar(
+            x=dow_labels,
+            y=dow_avg["mood_score"],
+            marker_color=dow_colors,
+        ))
+        fig4.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#888', family='Inter'),
+            xaxis=dict(gridcolor='#1a1a1a', zerolinecolor='#1a1a1a'),
+            yaxis=dict(gridcolor='#1a1a1a', zerolinecolor='#1a1a1a', range=[0, 5.5]),
+            height=200,
+            margin=dict(l=20, r=10, t=10, b=30),
+        )
+        st.plotly_chart(fig4, use_container_width=True)
+
+    # ── RECENT ENTRIES ──
+    st.html('<div style="font-size:0.82rem;font-weight:600;color:#888;margin:20px 0 8px;text-transform:uppercase;letter-spacing:0.05em;">Recent Entries</div>')
+    recent_entries = sorted(entries, key=lambda x: x["logged_at"], reverse=True)[:10]
+    for entry in recent_entries:
+        try:
+            t = dt.datetime.strptime(entry["logged_at"], "%Y-%m-%d %H:%M:%S")
+            time_str = t.strftime("%-m/%-d %-I:%M%p").lower()
+        except Exception:
+            time_str = entry["logged_at"][:16]
+        note = html_mod.escape(entry.get("note", "") or "")
+        note_html = f'<span class="mood-entry-note">{note}</span>' if note else ""
+        st.html(f'<div class="mood-entry-row">'
+                f'<span class="mood-entry-time">{time_str}</span>'
+                f'<span class="mood-entry-emoji">{entry["mood"]}</span>'
+                f'{note_html}'
+                f'</div>')
+
+    # Logout
+    st.html('<div style="height:20px;"></div>')
+    if st.button("Logout", key="dash_logout", use_container_width=False):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
         st.rerun()
-with hdr_center:
-    st.html(f"""<div style="text-align:center;padding-top:2px;">
-        <div style="font-size:1rem;font-weight:600;color:#fff;">🐢 TerpWell{mood_display}</div>
-        <div style="font-size:0.72rem;color:#555;margin-top:2px;">wellness companion · governed by AI</div>
-    </div>""")
-with hdr_right:
-    if st.button("📋", key="res_toggle", use_container_width=False):
-        st.session_state.show_resources = not st.session_state.show_resources
-        st.session_state.show_mood_log = False
-        st.rerun()
 
-st.html('<div style="border-bottom:1px solid #1a1a1a;margin-bottom:12px;"></div>')
+    st.html('<div class="disclaimer">TerpWell is not a substitute for professional help. If you\'re in crisis, call 988 or UMD CAPS: (301) 314-7651</div>')
 
-# ── RESOURCES PANEL ────────────────────────────────────────────────────────────
 
-if st.session_state.show_resources:
-    st.html("""<div class="resources-panel">
+def render_chat_screen():
+    import html as html_mod
+
+    user = st.session_state.user
+    mood_display = f" · {st.session_state.mood}" if st.session_state.mood else ""
+
+    # ── HEADER ──
+    hdr_left, hdr_center, hdr_right = st.columns([0.15, 0.70, 0.15], gap="small")
+    with hdr_left:
+        if st.button("📊", key="mood_dash_toggle", use_container_width=False):
+            st.session_state.screen = "mood_dashboard"
+            st.session_state.show_resources = False
+            st.rerun()
+    with hdr_center:
+        st.html(f"""<div style="text-align:center;padding-top:2px;">
+            <div style="font-size:1rem;font-weight:600;color:#fff;">🐢 TerpWell{mood_display}</div>
+            <div style="font-size:0.72rem;color:#555;margin-top:2px;">wellness companion · governed by AI</div>
+        </div>""")
+    with hdr_right:
+        if st.button("📋", key="res_toggle", use_container_width=False):
+            st.session_state.show_resources = not st.session_state.show_resources
+            st.rerun()
+
+    st.html('<div style="border-bottom:1px solid #1a1a1a;margin-bottom:12px;"></div>')
+
+    # ── RESOURCES PANEL ──
+    if st.session_state.show_resources:
+        st.html("""<div class="resources-panel">
     <div class="resources-panel-title">Emergency &amp; Campus Resources</div>
 
     <div class="resource-item">
@@ -702,75 +1228,15 @@ if st.session_state.show_resources:
     </div>
 
 </div>""")
+        # Logout in resources panel
+        if st.button("Logout", key="chat_logout", use_container_width=False):
+            for k in list(st.session_state.keys()):
+                del st.session_state[k]
+            st.rerun()
 
-# ── MOOD LOG PANEL ────────────────────────────────────────────────────────────
-
-if st.session_state.show_mood_log:
-    mood_log = st.session_state.mood_log
-
-    st.html('<div class="resources-panel"><div class="resources-panel-title">Mood Tracker</div>')
-    log_cols = st.columns([0.6, 0.4])
-    with log_cols[0]:
-        mood_note = st.text_input("How are you feeling right now?", key="mood_note_input", placeholder="Optional note...", label_visibility="collapsed")
-    with log_cols[1]:
-        mood_emojis = ["😢", "😟", "😐", "🙂", "😊"]
-        m_cols = st.columns(5)
-        for mi, (mc, me) in enumerate(zip(m_cols, mood_emojis)):
-            with mc:
-                if st.button(me, key=f"mlog_{mi}"):
-                    st.session_state.mood = me
-                    st.session_state.mood_log.append({
-                        "time": time.time(),
-                        "mood": me,
-                        "note": mood_note or "",
-                    })
-                    st.rerun()
-
-    if mood_log:
-        mood_map = {"😢": 1, "😟": 2, "😐": 3, "🙂": 4, "😊": 5}
-        mood_labels = {"😢": "Struggling", "😟": "Low", "😐": "Okay", "🙂": "Good", "😊": "Great"}
-
-        recent = mood_log[-10:]
-        dots_html = '<div style="display:flex;align-items:flex-end;gap:6px;margin:16px 0 12px;height:60px;">'
-        for entry in recent:
-            m = entry["mood"]
-            h = mood_map.get(m, 3) * 12
-            t = time.strftime("%I:%M", time.localtime(entry["time"])).lstrip("0")
-            dots_html += f'<div style="display:flex;flex-direction:column;align-items:center;gap:2px;flex:1;">'
-            dots_html += f'<div style="font-size:1.1rem;">{m}</div>'
-            dots_html += f'<div style="width:4px;height:{h}px;background:{"#34c759" if mood_map.get(m,3)>=4 else "#ff9f0a" if mood_map.get(m,3)==3 else "#ff453a"};border-radius:2px;"></div>'
-            dots_html += f'<div style="font-size:0.6rem;color:#555;">{t}</div>'
-            dots_html += '</div>'
-        dots_html += '</div>'
-        st.html(dots_html)
-
-        scores = [mood_map.get(e["mood"], 3) for e in mood_log]
-        avg = sum(scores) / len(scores)
-        avg_emoji = mood_emojis[min(4, max(0, round(avg) - 1))]
-        st.html(f'<div style="display:flex;gap:24px;justify-content:center;margin:8px 0;font-size:0.78rem;color:#888;">'
-                f'<span>Entries: <strong style="color:#ccc">{len(mood_log)}</strong></span>'
-                f'<span>Average: <strong style="color:#ccc">{avg_emoji} {avg:.1f}/5</strong></span>'
-                f'</div>')
-
-        for entry in reversed(mood_log[-5:]):
-            t = time.strftime("%I:%M %p", time.localtime(entry["time"])).lstrip("0")
-            note = entry.get("note", "")
-            note_html = f'<span style="color:#999;margin-left:8px;">{note}</span>' if note else ""
-            label = mood_labels.get(entry["mood"], "")
-            st.html(f'<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid #1a1a1a;">'
-                    f'<span style="font-size:0.75rem;color:#555;width:56px;">{t}</span>'
-                    f'<span style="font-size:1.2rem;">{entry["mood"]}</span>'
-                    f'<span style="font-size:0.8rem;color:#bbb;">{label}</span>'
-                    f'{note_html}</div>')
-    else:
-        st.html('<div style="text-align:center;color:#555;font-size:0.82rem;padding:20px 0;">No mood entries yet. Tap an emoji above to log how you\'re feeling.</div>')
-
-    st.html('</div>')
-
-# ── CRISIS BANNER ──────────────────────────────────────────────────────────────
-
-if st.session_state.crisis_detected:
-    st.html("""<div class="crisis-card">
+    # ── CRISIS BANNER ──
+    if st.session_state.crisis_detected:
+        st.html("""<div class="crisis-card">
     <div class="crisis-title">If you're in crisis, help is available now</div>
     <div class="crisis-body">
         📞 988 Suicide &amp; Crisis Lifeline (call or text)<br>
@@ -779,155 +1245,166 @@ if st.session_state.crisis_detected:
     </div>
 </div>""")
 
-# ── WELCOME SCREEN ─────────────────────────────────────────────────────────────
-
-if not st.session_state.messages and not st.session_state.pending_prompt:
-    st.html("""<div class="welcome-container">
+    # ── WELCOME SCREEN ──
+    if not st.session_state.messages and not st.session_state.pending_prompt:
+        display_name = user["display_name"].split()[0] if user else "Terp"
+        st.html(f"""<div class="welcome-container">
     <div class="welcome-icon">🐢</div>
-    <div class="welcome-title">Hey, Terp.</div>
+    <div class="welcome-title">Hey, {html_mod.escape(display_name)}.</div>
     <div class="welcome-sub">How's your day going? I'm here to listen.</div>
 </div>""")
 
-    st.html('<div style="text-align:center;color:#666;font-size:0.82rem;margin:16px 0 8px;">How are you feeling?</div>')
-    moods = ["😢", "😟", "😐", "🙂", "😊"]
-    cols = st.columns(5)
-    for i, (col, emoji) in enumerate(zip(cols, moods)):
-        with col:
-            if st.button(emoji, key=f"mood_{i}", use_container_width=True):
-                st.session_state.mood = emoji
-                st.session_state.mood_log.append({
-                    "time": time.time(),
-                    "mood": emoji,
-                    "note": "",
-                })
+        st.html('<div style="text-align:center;color:#666;font-size:0.82rem;margin:16px 0 8px;">How are you feeling?</div>')
+        moods = ["😢", "😟", "😐", "🙂", "😊"]
+        mood_scores = {"😢": 1, "😟": 2, "😐": 3, "🙂": 4, "😊": 5}
+        cols = st.columns(5)
+        for i, (col, emoji) in enumerate(zip(cols, moods)):
+            with col:
+                if st.button(emoji, key=f"mood_{i}", use_container_width=True):
+                    st.session_state.mood = emoji
+                    if user:
+                        log_mood_db(user["id"], emoji, mood_scores[emoji], "")
+                    st.rerun()
+
+        st.html('<div style="height:24px"></div>')
+        suggestions = [
+            "Midterms are crushing me right now",
+            "I don't really have friends on campus yet",
+            "I need a place to decompress near UMD",
+            "I can't stop procrastinating and I feel awful",
+        ]
+        for i, s in enumerate(suggestions):
+            if st.button(s, key=f"sug_{i}", use_container_width=True):
+                st.session_state.pending_prompt = s
                 st.rerun()
 
-    st.html('<div style="height:24px"></div>')
-    suggestions = [
-        "Midterms are crushing me right now",
-        "I don't really have friends on campus yet",
-        "I need a place to decompress near UMD",
-        "I can't stop procrastinating and I feel awful",
-    ]
-    for i, s in enumerate(suggestions):
-        if st.button(s, key=f"sug_{i}", use_container_width=True):
-            st.session_state.pending_prompt = s
-            st.rerun()
+    # ── CHAT MESSAGES ──
+    elif st.session_state.messages:
+        for msg in st.session_state.messages:
+            if msg["role"] == "user":
+                escaped = html_mod.escape(msg["content"]).replace("\n", "<br>")
+                st.html(f'<div class="msg-row-user"><div class="msg-bubble-user">{escaped}</div></div>')
+            else:
+                avatar_col, content_col = st.columns([0.06, 0.94], gap="small")
+                with avatar_col:
+                    st.html('<div class="msg-avatar">🐢</div>')
+                with content_col:
+                    st.markdown(msg["content"])
+                    audit = msg.get("audit", {})
+                    was_corrected = msg.get("was_corrected", False)
+                    if was_corrected:
+                        st.html('<div class="gov-tag reviewed">🛡️ Reviewed &amp; Corrected</div>')
+                    elif audit.get("approved", True):
+                        st.html('<div class="gov-tag verified">🛡️ Verified</div>')
+                    else:
+                        st.html('<div class="gov-tag reviewed">🛡️ Reviewed</div>')
 
-# ── CHAT MESSAGES ──────────────────────────────────────────────────────────────
+    # ── STATUS PLACEHOLDER ──
+    status_ph = st.empty()
 
-elif st.session_state.messages:
-    import html as html_mod
+    # ── INPUT HANDLING ──
+    if st.session_state.pending_prompt:
+        user_input = st.session_state.pending_prompt
+        st.session_state.pending_prompt = None
+    else:
+        user_input = st.chat_input("What's on your mind?")
 
-    for msg in st.session_state.messages:
-        if msg["role"] == "user":
-            escaped = html_mod.escape(msg["content"]).replace("\n", "<br>")
-            st.html(f'<div class="msg-row-user"><div class="msg-bubble-user">{escaped}</div></div>')
-        else:
-            avatar_col, content_col = st.columns([0.06, 0.94], gap="small")
-            with avatar_col:
-                st.html('<div class="msg-avatar">🐢</div>')
-            with content_col:
-                st.markdown(msg["content"])
-                audit = msg.get("audit", {})
-                was_corrected = msg.get("was_corrected", False)
-                if was_corrected:
-                    st.html('<div class="gov-tag reviewed">🛡️ Reviewed &amp; Corrected</div>')
-                elif audit.get("approved", True):
-                    st.html('<div class="gov-tag verified">🛡️ Verified</div>')
-                else:
-                    st.html('<div class="gov-tag reviewed">🛡️ Reviewed</div>')
+    # ── PROCESS MESSAGE ──
+    if user_input:
+        raw_text = user_input.strip()
+        if not raw_text:
+            st.stop()
 
-# ── STATUS PLACEHOLDER ─────────────────────────────────────────────────────────
+        # Fast regex crisis check first
+        if detect_crisis(raw_text):
+            st.session_state.crisis_detected = True
 
-status_ph = st.empty()
-
-# ── INPUT HANDLING ─────────────────────────────────────────────────────────────
-
-if st.session_state.pending_prompt:
-    user_input = st.session_state.pending_prompt
-    st.session_state.pending_prompt = None
-else:
-    user_input = st.chat_input("What's on your mind?")
-
-# ── PROCESS MESSAGE ────────────────────────────────────────────────────────────
-
-if user_input:
-    raw_text = user_input.strip()
-    if not raw_text:
-        st.stop()
-
-    # Fast regex crisis check first
-    if detect_crisis(raw_text):
-        st.session_state.crisis_detected = True
-
-    # Extract topics
-    st.session_state.topics.extend(extract_topics(raw_text))
-
-    st.session_state.messages.append({
-        "role": "user",
-        "content": raw_text,
-        "timestamp": time.time(),
-    })
-
-    # Build API history (exclude the just-added user message)
-    api_history = [
-        {"role": m["role"], "content": m["content"]}
-        for m in st.session_state.messages[:-1]
-        if m["role"] in ("user", "assistant")
-    ]
-
-    # Show user bubble inline so it appears before streaming
-    import html as html_mod
-    escaped = html_mod.escape(raw_text).replace("\n", "<br>")
-    st.html(f'<div class="msg-row-user"><div class="msg-bubble-user">{escaped}</div></div>')
-
-    # Streaming assistant bubble
-    avatar_col, content_col = st.columns([0.06, 0.94], gap="small")
-    with avatar_col:
-        st.html('<div class="msg-avatar">🐢</div>')
-    with content_col:
-        stream_placeholder = st.empty()
-
-    try:
-        # Stream companion response word-by-word
-        draft = stream_companion(raw_text, st.session_state.mood or "Not specified", api_history, stream_placeholder)
-
-        # Claude-powered crisis detection (catches nuanced signals regex misses)
-        with st.spinner("🛡️ Auditing response…"):
-            crisis_result = detect_crisis_claude(raw_text)
-            level = crisis_result.get("crisis_level", "none")
-            st.session_state.triage_level = level
-            if level in ("mild", "urgent"):
-                st.session_state.crisis_detected = True
-
-            # Run governance AFTER streaming completes
-            audit, was_corrected = run_governance(raw_text, draft)
-
-        final_response = audit.pop("_final", draft)
+        # Extract topics
+        st.session_state.topics.extend(extract_topics(raw_text))
 
         st.session_state.messages.append({
-            "role": "assistant",
-            "content": final_response,
+            "role": "user",
+            "content": raw_text,
             "timestamp": time.time(),
-            "audit": audit,
-            "was_corrected": was_corrected,
         })
-        st.rerun()
 
-    except anthropic.AuthenticationError:
-        status_ph.empty()
-        st.error("Authentication failed. Please set ANTHROPIC_API_KEY or configure AWS credentials.")
-    except anthropic.RateLimitError:
-        status_ph.empty()
-        st.error("Rate limit reached. Please wait a moment and try again.")
-    except anthropic.APIConnectionError:
-        status_ph.empty()
-        st.error("Connection error. Please check your internet connection.")
-    except Exception as e:
-        status_ph.empty()
-        st.error(f"Something went wrong: {str(e)}")
+        # Save user message to DB
+        if user and st.session_state.chat_session_id:
+            save_chat_message(st.session_state.chat_session_id, user["id"], "user", raw_text)
 
-# ── DISCLAIMER ─────────────────────────────────────────────────────────────────
+        # Build API history (exclude the just-added user message)
+        api_history = [
+            {"role": m["role"], "content": m["content"]}
+            for m in st.session_state.messages[:-1]
+            if m["role"] in ("user", "assistant")
+        ]
 
-st.html('<div class="disclaimer">TerpWell is not a substitute for professional help. If you\'re in crisis, call 988 or UMD CAPS: (301) 314-7651</div>')
+        # Show user bubble inline so it appears before streaming
+        escaped = html_mod.escape(raw_text).replace("\n", "<br>")
+        st.html(f'<div class="msg-row-user"><div class="msg-bubble-user">{escaped}</div></div>')
+
+        # Streaming assistant bubble
+        avatar_col, content_col = st.columns([0.06, 0.94], gap="small")
+        with avatar_col:
+            st.html('<div class="msg-avatar">🐢</div>')
+        with content_col:
+            stream_placeholder = st.empty()
+
+        try:
+            # Stream companion response word-by-word
+            draft = stream_companion(raw_text, st.session_state.mood or "Not specified", api_history, stream_placeholder)
+
+            # Claude-powered crisis detection (catches nuanced signals regex misses)
+            with st.spinner("🛡️ Auditing response…"):
+                crisis_result = detect_crisis_claude(raw_text)
+                level = crisis_result.get("crisis_level", "none")
+                st.session_state.triage_level = level
+                if level in ("mild", "urgent"):
+                    st.session_state.crisis_detected = True
+
+                # Run governance AFTER streaming completes
+                audit, was_corrected = run_governance(raw_text, draft)
+
+            final_response = audit.pop("_final", draft)
+
+            # Save assistant message to DB
+            if user and st.session_state.chat_session_id:
+                save_chat_message(
+                    st.session_state.chat_session_id, user["id"], "assistant",
+                    final_response, json.dumps(audit)
+                )
+
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": final_response,
+                "timestamp": time.time(),
+                "audit": audit,
+                "was_corrected": was_corrected,
+            })
+            st.rerun()
+
+        except anthropic.AuthenticationError:
+            status_ph.empty()
+            st.error("Authentication failed. Please set ANTHROPIC_API_KEY or configure AWS credentials.")
+        except anthropic.RateLimitError:
+            status_ph.empty()
+            st.error("Rate limit reached. Please wait a moment and try again.")
+        except anthropic.APIConnectionError:
+            status_ph.empty()
+            st.error("Connection error. Please check your internet connection.")
+        except Exception as e:
+            status_ph.empty()
+            st.error(f"Something went wrong: {str(e)}")
+
+    # ── DISCLAIMER ──
+    st.html('<div class="disclaimer">TerpWell is not a substitute for professional help. If you\'re in crisis, call 988 or UMD CAPS: (301) 314-7651</div>')
+
+
+# ── MAIN ROUTING ──────────────────────────────────────────────────────────────
+
+if not st.session_state.logged_in:
+    render_login_screen()
+elif st.session_state.screen == "mood_dashboard":
+    render_mood_dashboard()
+else:
+    render_chat_screen()
