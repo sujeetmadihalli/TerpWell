@@ -927,11 +927,20 @@ html, body, [class*="css"] { font-family: 'Inter', -apple-system, sans-serif !im
 }
 
 .disclaimer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
     text-align: center;
-    font-size: 0.68rem;
+    font-size: 0.65rem;
     color: #3a3a3a;
-    padding: 12px 0;
-    margin-top: 8px;
+    padding: 4px 0;
+    background: #0a0a0a;
+    z-index: 999;
+}
+/* Push chat input up to make room for disclaimer */
+[data-testid="stBottom"] {
+    padding-bottom: 22px !important;
 }
 
 /* Login */
@@ -1485,7 +1494,7 @@ def render_chat_screen():
 
     # ── WELCOME SCREEN ──
     if not st.session_state.messages and not st.session_state.pending_prompt:
-        display_name = user["display_name"].split()[0] if user else "Terp"
+        display_name = "Terp"
         st.html(f"""<div class="welcome-container">
     <div class="welcome-icon">🐢</div>
     <div class="welcome-title">Hey, {html_mod.escape(display_name)}.</div>
