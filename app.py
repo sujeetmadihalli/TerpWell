@@ -1,5 +1,5 @@
 """
-TerpWell — UMD Wellness Companion
+TerpWell,UMD Wellness Companion
 Clean mobile-first redesign with two-layer AI governance.
 """
 
@@ -23,14 +23,14 @@ JOURNAL_PROMPTS = [
     "If a friend told you they were feeling what you're feeling, what would you say to them?",
     "What's one small thing you can do in the next hour to take care of yourself?",
     "What does 'feeling okay' look like for you? Describe it.",
-    "What's one boundary you wish you could set — and what's stopping you?",
+    "What's one boundary you wish you could set, and what's stopping you?",
 ]
 
 GROUNDING_STEPS = [
     ("5 things you can SEE", "Look around and name 5 things you can see right now."),
-    ("4 things you can TOUCH", "Notice 4 things you can physically feel — the chair, your feet on the floor."),
+    ("4 things you can TOUCH", "Notice 4 things you can physically feel, like the chair, your feet on the floor."),
     ("3 things you can HEAR", "Listen carefully. What 3 sounds can you hear?"),
-    ("2 things you can SMELL", "Notice 2 scents around you — even subtle ones."),
+    ("2 things you can SMELL", "Notice 2 scents around you, even subtle ones."),
     ("1 thing you can TASTE", "What is one thing you can taste right now?"),
 ]
 
@@ -251,7 +251,7 @@ def detect_crisis(text: str) -> bool:
     return bool(CRISIS_PATTERN.search(text))
 
 def detect_crisis_claude(text: str) -> dict:
-    """Claude-powered nuanced crisis classification — catches paraphrases regex misses."""
+    """Claude-powered nuanced crisis classification,catches paraphrases regex misses."""
     try:
         client = get_client()
         response = client.messages.create(
@@ -296,14 +296,14 @@ def extract_topics(text: str) -> list:
 # ── PROMPTS ───────────────────────────────────────────────────────────────────
 
 def companion_prompt(mood, mood_context=""):
-    return f"""You are TerpWell — think of yourself as a caring older student at the University of Maryland who's been through it all. You talk like a real person, not a chatbot. You use casual language, contractions, and you're genuinely warm. You're NOT a therapist, counselor, or medical professional — you're a supportive friend who happens to know every resource on campus.
+    return f"""You are TerpWell,think of yourself as a caring older student at the University of Maryland who's been through it all. You talk like a real person, not a chatbot. You use casual language, contractions, and you're genuinely warm. You're NOT a therapist, counselor, or medical professional,you're a supportive friend who happens to know every resource on campus.
 
 ## Your Personality:
 - You speak naturally: "hey", "honestly", "I totally get that", "that sounds really rough"
 - You share relatable observations: "midterm season at UMD is no joke" not "exam periods can be stressful"
-- You're specific to UMD — you mention real places, real experiences, real campus life
+- You're specific to UMD,you mention real places, real experiences, real campus life
 - You ask thoughtful follow-up questions, don't just give advice
-- You validate before suggesting — always acknowledge their feelings first
+- You validate before suggesting,always acknowledge their feelings first
 - One suggestion at a time, not a laundry list
 - Keep it to 2-3 short paragraphs max
 
@@ -311,28 +311,28 @@ def companion_prompt(mood, mood_context=""):
 When relevant, naturally weave in real UMD places and suggestions:
 
 RELAXATION & NATURE:
-- Lake Artemesia — peaceful walk, only 10 min from campus
-- The Garden of Reflection near the Chapel — quiet meditation spot
-- Paint Branch Trail — great for clearing your head with a run or walk
-- McKeldin Mall — sit on the grass, people-watch, decompress between classes
-- Clarice Smith Performing Arts Center — free concerts and performances
+- Lake Artemesia, peaceful walk, only 10 min from campus
+- The Garden of Reflection near the Chapel. Quiet meditation spot
+- Paint Branch Trail. Great for clearing your head with a run or walk
+- McKeldin Mall, sit on the grass, people-watch, decompress between classes
+- Clarice Smith Performing Arts Center. Free concerts and performances
 
 FOOD & COMFORT:
-- The Diner (open late) — comfort food when you need it at 1am
-- Board & Brew on Route 1 — chill board game cafe, great for socializing
-- Vigilante Coffee in Hyattsville — cozy off-campus study spot
-- College Park farmers market (Saturdays) — nice way to get outside
+- The Diner (open late). Comfort food when you need it at 1am
+- Board & Brew on Route 1, chill board game cafe, great for socializing
+- Vigilante Coffee in Hyattsville. Cozy off-campus study spot
+- College Park farmers market (Saturdays). Nice way to get outside
 
 SOCIAL & COMMUNITY:
-- UMD RecWell — group fitness classes, rock climbing wall at Eppley
-- Stamp Student Union — game room, events, just a good place to hang
-- 400+ student orgs — there's literally a club for everything
-- Intramural sports — low-pressure way to move your body and meet people
-- Terrapin Trail Club — hiking trips to get off campus
+- UMD RecWell, group fitness classes, rock climbing wall at Eppley
+- Stamp Student Union, game room, events, just a good place to hang
+- 400+ student orgs. There's literally a club for everything
+- Intramural sports. Low-pressure way to move your body and meet people
+- Terrapin Trail Club. Hiking trips to get off campus
 
 ACADEMIC SUPPORT:
 - Tutoring at the Learning Assistance Service in Shoemaker
-- Writing Center in Tawes Hall — help with papers
+- Writing Center in Tawes Hall. Help with papers
 - Academic Success & Tutorial Services
 - Each college has its own advising office
 
@@ -342,19 +342,19 @@ MINDFULNESS & WELLNESS:
 - Health Center has wellness workshops throughout the semester
 
 NEURODIVERGENT SUPPORT:
-- Accessibility & Disability Service (ADS): (301) 314-7682, ads.umd.edu — ADHD, learning disabilities, autism support, free for registered students
+- Accessibility & Disability Service (ADS): (301) 314-7682, ads.umd.edu. ADHD, learning disabilities, autism support, free for registered students
 - ADHD/LD Coaching: through ADS, free for registered students, ads.umd.edu/services/coaching
 - If you're struggling in class and think ADHD or a learning difference might be involved, ADS is genuinely helpful and low-barrier to access
 
 ## Crisis Protocol:
 If the user mentions suicide, self-harm, wanting to die, or immediate danger, drop everything and respond with empathy + these exact resources:
 "I'm really glad you told me this. You don't have to go through this alone. Please reach out right now:
-- **988 Suicide & Crisis Lifeline** — Call or text 988 (24/7, free)
-- **UMD CAPS Crisis Line** — (301) 314-7651 (press 1 after hours)
-- **Crisis Text Line** — Text HOME to 741741
+- **988 Suicide & Crisis Lifeline**: Call or text 988 (24/7, free)
+- **UMD CAPS Crisis Line**: (301) 314-7651 (press 1 after hours)
+- **Crisis Text Line**,Text HOME to 741741
 These are real people who care and are trained to help. Can I help you take that step?"
 
-## Verified UMD Resources (use ONLY these — never make up resources):
+## Verified UMD Resources (use ONLY these,never make up resources):
 - UMD Counseling Center (CAPS): (301) 314-7651, Shoemaker Building, 1st floor
 - CAPS after-hours crisis: (301) 314-7651, press 1
 - UMD Health Center: (301) 314-8180, Campus Drive
@@ -376,8 +376,8 @@ Use this context to personalize your response. If their mood has been declining,
 - Be a human, not a helpline script
 - Reference specific UMD places, not generic "go outside" or "try meditation"
 - If someone mentions a specific situation (roommate issues, academic stress, loneliness), ask follow-up questions before jumping to solutions
-- When suggesting professional help, normalize it: "tons of Terps use CAPS — it's literally free and right in Shoemaker"
-- Never say "I'm just an AI" unprompted — only clarify your limitations if directly asked or if the situation requires professional help
+- When suggesting professional help, normalize it: "tons of Terps use CAPS, it's literally free and right in Shoemaker"
+- Never say "I'm just an AI" unprompted. Only clarify your limitations if directly asked or if the situation requires professional help
 - Use the student's mood context naturally, don't announce it"""
 
 def governance_prompt():
@@ -390,7 +390,7 @@ def governance_prompt():
 4. NO_MINIMIZING: Response must NOT dismiss or minimize feelings ("just think positive", "others have it worse")
 5. RESOURCE_ACCURACY: All phone numbers must be correct: CAPS=(301)314-7651, Health Center=(301)314-8180, Police=(301)405-3333, CARE=(301)314-2222, Dean=(301)314-8783, ADS=(301)314-7682
 6. NO_HALLUCINATION: No fake organizations, hotlines, buildings, or UMD resources. Only reference real places.
-7. EMPATHETIC_TONE: Must be warm, human, and validating — not robotic or clinical
+7. EMPATHETIC_TONE: Must be warm, human, and validating, not robotic or clinical
 
 Respond ONLY with this JSON (no other text):
 {"approved": true/false, "score": 0-100, "checks": {"crisis_detection": {"pass": true/false, "note": "..."}, "no_diagnosis": {"pass": true/false, "note": "..."}, "no_prescribing": {"pass": true/false, "note": "..."}, "no_minimizing": {"pass": true/false, "note": "..."}, "resource_accuracy": {"pass": true/false, "note": "..."}, "no_hallucination": {"pass": true/false, "note": "..."}, "empathetic_tone": {"pass": true/false, "note": "..."}}, "corrections": "...", "corrected_response": "..."}"""
@@ -526,7 +526,7 @@ def export_session_markdown(
         "- **UMD Health Center:** (301) 314-8180",
         "",
         "---",
-        "*Generated by TerpWell — UMD Wellness Companion*  ",
+        "*Generated by TerpWell,UMD Wellness Companion*  ",
         "*Not a substitute for professional mental health care.*",
     ]
     return "\n".join(lines)
@@ -917,7 +917,7 @@ html, body, [class*="css"] { font-family: 'Inter', -apple-system, sans-serif !im
     border-color: #3a3a3a !important;
     color: #fff !important;
 }
-/* No special circular overrides — let all buttons use the default pill style */
+/* No special circular overrides,let all buttons use the default pill style */
 
 [data-testid="stHorizontalBlock"] { gap: 8px !important; }
 
@@ -1516,6 +1516,10 @@ def render_chat_screen():
                 st.session_state.pending_prompt = s
                 st.rerun()
 
+    # ── PENDING PROMPT (show thinking while processing) ──
+    elif st.session_state.pending_prompt and not st.session_state.messages:
+        st.html('<div class="thinking"><div class="thinking-dots"><span></span><span></span><span></span></div><span class="thinking-text">thinking...</span></div>')
+
     # ── CHAT MESSAGES ──
     elif st.session_state.messages:
         for msg in st.session_state.messages:
@@ -1604,7 +1608,7 @@ def render_chat_screen():
                             color:#71717a;margin-bottom:0.4rem;">📝 Journal Prompt</div>
                 <div style="font-size:0.95rem;color:#e4e4e7;line-height:1.6;">{st.session_state.journal_prompt}</div>
                 <div style="font-size:0.75rem;color:#52525b;margin-top:0.5rem;">
-                    Take a moment to reflect. You don't need to share — just write for yourself.
+                    Take a moment to reflect. You don't need to share,just write for yourself.
                 </div>
             </div>"""
         )
@@ -1660,6 +1664,8 @@ def render_chat_screen():
         st.session_state.pending_prompt = None
     else:
         user_input = st.chat_input("What's on your mind?")
+
+    st.html('<div class="disclaimer">TerpWell is not a substitute for professional help. If you\'re in crisis, call 988 or UMD CAPS: (301) 314-7651</div>')
 
     # ── PROCESS MESSAGE ──
     if user_input:
@@ -1759,8 +1765,6 @@ def render_chat_screen():
             status_ph.empty()
             st.error(f"Something went wrong: {str(e)}")
 
-    # ── DISCLAIMER ──
-    st.html('<div class="disclaimer">TerpWell is not a substitute for professional help. If you\'re in crisis, call 988 or UMD CAPS: (301) 314-7651</div>')
 
 
 # ── MAIN ROUTING ──────────────────────────────────────────────────────────────
